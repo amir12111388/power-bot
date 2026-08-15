@@ -1,0 +1,548 @@
+import json
+import os
+import random
+import time
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ChatType
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
+
+# =========================
+# تنظیمات
+# =========================
+TOKEN = "PUT_YOUR_BOT_TOKEN_HERE"
+OWNER_ID = 7860500580
+DATA_FILE = "power_bot_data.json"
+MINING_COOLDOWN = 180  # 3 minutes
+DIAMOND_TO_COIN = 10
+
+MINE_WORDS = {
+    "استخراج",
+    "استخراج الماس",
+    "استر",
+    "استخر",
+    "mine",
+}
+
+# =========================
+# داده‌ها
+# =========================
+data = {
+    "users": {},
+    "mining": {},
+}
+
+
+# =========================
+# ذخیره / بارگذاری
+# =========================
+def load_data():
+    global data
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as file:
+                loaded = json.load(file)
+                data["users"] = loaded.get("users", {})
+                data["mining"] = loaded.get("mining", {})
+        except Exception as error:
+            print("خطا در بارگذاری اطلاعات:", error)
+
+
+def save_data():
+    try:
+        with open(DATA_FILE, "w", encoding="utf-8") as file:
+            json.dump(data, file, ensure_ascii=False, indent=2)
+    except Exception as error:
+        print("خطا در ذخیره اطلاعات:", error)
+
+
+# =========================
+# کاربران
+# =========================
+def ensure_user(user_id, name):
+    user_id = str(user_id)
+    if user_id not in data["users"]:
+        data["users"][user_id] = {
+            "name": name,
+            "diamonds": 100,
+            "coins": 0,
+        }
+        save_data()
+    else:
+        data["users"][user_id]["name"] = name
+        save_data()
+
+
+def get_user(user_id, name="کاربر"):
+    user_id = str(user_id)
+    ensure_user(user_id, name)
+    return data["users"][user_id]
+
+
+def get_diamonds(user_id, name="کاربر"):
+    if int(user_id) == OWNER_ID:
+        return float("inf")
+    return get_user(user_id, name)["diamonds"]
+
+
+def get_coins(user_id, name="کاربر"):
+    if int(user_id) == OWNER_ID:
+        return float("inf")
+    return get_user(user_id, name)["coins"]
+
+
+def add_diamonds(user_id, amount, name="کاربر"):
+    user = get_user(user_id, name)
+    user["diamonds"] += amount
+    save_data()
+
+
+def add_coins(user_id, amount, name="کاربر"):
+    user = get_user(user_id, name)
+    user["coins"] += amount
+    save_data()
+
+
+def remove_coins(user_id, amount, name="کاربر"):
+    user = get_user(user_id, name)
+    if user["coins"] >= amount:
+        user["coins"] -= amount
+        save_data()
+        return True
+    return False
+
+
+# =========================
+# ابزارها
+# =========================
+def mining_key(user_id, chat_id):
+    return f"{user_id}:{chat_id}"
+
+
+def get_remaining(user_id, chat_id):
+    key = mining_key(user_id, chat_id)
+    last_time = data["mining"].get(key, 0)
+    elapsed = time.time() - last_time
+    remaining = MINING_COOLDOWN - elapsed
+    return max(0, int(remaining))
+
+
+def format_remaining(seconds):
+    minutes = seconds // 60
+    sec = seconds % 60
+    if minutes > 0:
+        return f"{minutes} دقیقه و {sec} ثانیه"
+    return f"{sec} ثانیه"
+
+
+def is_private(update: Update):
+    return update.effective_chat and update.effective_chat.type == ChatType.PRIVATE
+
+
+def is_group(update: Update):
+    return update.effective_chat and update.effective_chat.type in (
+        ChatType.GROUP,
+        ChatType.SUPERGROUP,
+    )
+
+
+# =========================
+# /start
+# =========================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat = update.effective_chat
+
+    if not user or not chat:
+        return
+
+    name = user.first_name or "کاربر"
+    ensure_user(user.id, name)
+
+    if is_group(update):
+        keyboard = [
+            [
+                InlineKeyboardButton("💰 موجودی", callback_data="group_balance"),
+                InlineKeyboardButton("📖 راهنما", callback_data="group_help"),
+            ],
+            [
+                InlineKeyboardButton("🔄 انتقال سکه", callback_data="transfer_help"),
+            ],
+        ]
+
+        text = (
+            f"👋 سلام {name}!\n\n"
+            "🎮 به Power Bot خوش آمدید.\n\n"
+            "💎 هر کاربر با استخراج می‌تواند الماس دریافت کند.\n"
+            "🪙 الماس‌ها را می‌توان به سکه تبدیل کرد.\n\n"
+            "⛏ برای استخراج بنویس:\n"
+            "استخراج\n"
+            "استخراج الماس\n"
+            "استر\n"
+            "استخر\n\n"
+            "💰 برای دیدن موجودی بنویس:\n"
+            "موجودی\n\n"
+            "🎮 برای دیدن بازی‌ها بنویس:\n"
+            "بازی‌ها\n\n"
+            "🔄 برای انتقال سکه می‌توانی از دکمه انتقال استفاده کنی."
+        )
+
+        await update.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    # private
+    bot_username = context.bot.username
+    add_group_url = f"https://t.me/{bot_username}?startgroup=true"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("➕ اضافه کردن ربات به گروه", url=add_group_url),
+        ],
+        [
+            InlineKeyboardButton("🔄 تبدیل", callback_data="convert"),
+            InlineKeyboardButton("📖 راهنما", callback_data="private_help"),
+        ],
+        [
+            InlineKeyboardButton("💰 موجودی", callback_data="private_balance"),
+        ],
+    ]
+
+    text = (
+        f"👋 سلام {name} عزیز!\n\n"
+        "🎮 به Power Bot خوش آمدی.\n\n"
+        "💎 سیستم اقتصادی ربات شامل دو واحد مجازی است:\n"
+        "💎 الماس\n"
+        "🪙 سکه\n\n"
+        "⛏ با استخراج می‌توانی الماس بگیری.\n"
+        "🔄 هر ۱ الماس برابر با ۱۰ سکه است.\n"
+        "🎮 بازی‌های سرگرمی هم داخل گروه قابل اجرا هستند.\n\n"
+        "👥 برای استفاده در گروه، ربات را با دکمه زیر به گروه اضافه کن."
+    )
+
+    await update.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+# =========================
+# موجودی
+# =========================
+async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user:
+        return
+
+    name = user.first_name or "کاربر"
+
+    if user.id == OWNER_ID:
+        text = (
+            "👑 موجودی سازنده\n\n"
+            "💎 الماس: ♾️\n"
+            "🪙 سکه: ♾️"
+        )
+        await update.message.reply_text(text)
+        return
+
+    diamonds = get_diamonds(user.id, name)
+    coins = get_coins(user.id, name)
+
+    text = (
+        "💰 موجودی شما\n\n"
+        f"💎 الماس: {diamonds}\n"
+        f"🪙 سکه: {coins}"
+    )
+    await update.message.reply_text(text)
+
+
+# =========================
+# استخراج
+# =========================
+async def mine_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat = update.effective_chat
+
+    if not user or not chat:
+        return
+
+    name = user.first_name or "کاربر"
+
+    remaining = get_remaining(user.id, chat.id)
+    if remaining > 0:
+        text = (
+            "⛏ کارگران معدن مشغول کار هستند! 😂\n\n"
+            f"⏳ {format_remaining(remaining)} دیگه می‌تونی دوباره استخراج کنی."
+        )
+        await update.message.reply_text(text)
+        return
+
+    amount = random.randint(10, 100)
+    add_diamonds(user.id, amount, name)
+
+    key = mining_key(user.id, chat.id)
+    data["mining"][key] = time.time()
+    save_data()
+
+    diamonds = get_diamonds(user.id, name)
+
+    text = (
+        "⛏ استخراج موفق بود!\n\n"
+        f"💎 الماس دریافت شده: {amount}\n"
+        f"💎 موجودی الماس: {diamonds}\n\n"
+        "⏳ استخراج بعدی: ۳ دقیقه دیگر"
+    )
+    await update.message.reply_text(text)
+
+
+# =========================
+# تبدیل
+# =========================
+async def convert_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query:
+        return
+
+    await query.answer()
+    text = (
+        "🔄 تبدیل الماس به سکه\n\n"
+        "هر ۱ الماس = ۱۰ سکه است.\n\n"
+        "برای مثال اگر ۱۵۰ الماس داشته باشی،\n"
+        "می‌توانی ۱۵۰ الماس را به ۱۵۰۰ سکه تبدیل کنی.\n\n"
+        "برای تبدیل بنویس:\n"
+        "تبدیل 150"
+    )
+    await query.edit_message_text(text)
+
+
+async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user:
+        return
+
+    name = user.first_name or "کاربر"
+
+    if user.id == OWNER_ID:
+        text = (
+            "👑 سازنده نیازی به تبدیل ندارد.\n\n"
+            "🔄 تبدیل شما انجام شد.\n"
+            f"🪙 سکه دریافتی: ∞"
+        )
+        await update.message.reply_text(text)
+        return
+
+    if not context.args:
+        text = (
+            "🔄 مقدار الماسی که می‌خواهی تبدیل کنی را بنویس.\n\n"
+            "مثال:\n"
+            "تبدیل 150"
+        )
+        await update.message.reply_text(text)
+        return
+
+    try:
+        amount = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ فقط عدد بفرست.")
+        return
+
+    if amount <= 0:
+        await update.message.reply_text("❌ مقدار باید بیشتر از صفر باشد.")
+        return
+
+    diamonds = get_diamonds(user.id, name)
+    if diamonds < amount:
+        await update.message.reply_text("❌ الماس کافی نداری.")
+        return
+
+    data["users"][str(user.id)]["diamonds"] -= amount
+    data["users"][str(user.id)]["coins"] += amount * DIAMOND_TO_COIN
+    save_data()
+
+    text = (
+        "✅ تبدیل انجام شد!\n\n"
+        f"💎 الماس مصرف شده: {amount}\n"
+        f"🪙 سکه دریافت شده: {amount * DIAMOND_TO_COIN}\n\n"
+        f"💎 الماس باقی‌مانده: {data['users'][str(user.id)]['diamonds']}\n"
+        f"🪙 سکه فعلی: {data['users'][str(user.id)]['coins']}"
+    )
+    await update.message.reply_text(text)
+
+
+# =========================
+# انتقال سکه
+# =========================
+async def transfer_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query:
+        return
+
+    await query.answer()
+    text = (
+        "🔄 انتقال سکه\n\n"
+        "برای انتقال سکه به یک کاربر، باید روی پیام او Reply کنی و بنویسی:\n\n"
+        "انتقال 60\n\n"
+        "مثلاً اگر روی پیام دوستت Reply کنی و بنویسی:\n"
+        "انتقال 60\n\n"
+        "۶۰ سکه مجازی به او منتقل می‌شود."
+    )
+    await query.edit_message_text(text)
+
+
+async def transfer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    message = update.message
+
+    if not user or not message:
+        return
+
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        await message.reply_text("❌ باید روی پیام طرف Reply کنی.")
+        return
+
+    if not context.args:
+        await message.reply_text("❌ مقدار را بنویس. مثال: انتقال 60")
+        return
+
+    try:
+        amount = int(context.args[0])
+    except ValueError:
+        await message.reply_text("❌ فقط عدد بفرست.")
+        return
+
+    if amount <= 0:
+        await message.reply_text("❌ مقدار باید بیشتر از صفر باشد.")
+        return
+
+    sender_name = user.first_name or "کاربر"
+    target_user = message.reply_to_message.from_user
+    target_name = target_user.first_name or "کاربر"
+
+    if user.id == target_user.id:
+        await message.reply_text("❌ نمی‌تونی به خودت انتقال بدی.")
+        return
+
+    sender_coins = get_coins(user.id, sender_name)
+    if sender_coins < amount:
+        await message.reply_text("❌ سکه کافی نداری.")
+        return
+
+    remove_coins(user.id, amount, sender_name)
+    add_coins(target_user.id, amount, target_name)
+
+    text = (
+        "✅ انتقال با موفقیت انجام شد!\n\n"
+        f"👤 از طرف: {sender_name}\n"
+        f"🎯 گیرنده: {target_name}\n"
+        f"🪙 مقدار: {amount}"
+    )
+    await message.reply_text(text)
+
+
+# =========================
+# دکمه‌های شیشه‌ای
+# =========================
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query:
+        return
+
+    data_key = query.data
+    await query.answer()
+
+    if data_key == "group_balance" or data_key == "private_balance":
+        user = query.from_user
+        name = user.first_name or "کاربر"
+        if user.id == OWNER_ID:
+            text = "👑 موجودی سازنده\n\n💎 الماس: ♾️\n🪙 سکه: ♾️"
+        else:
+            diamonds = get_diamonds(user.id, name)
+            coins = get_coins(user.id, name)
+            text = f"💰 موجودی شما\n\n💎 الماس: {diamonds}\n🪙 سکه: {coins}"
+        await query.edit_message_text(text)
+        return
+
+    if data_key == "group_help" or data_key == "private_help":
+        text = (
+            "📖 راهنما\n\n"
+            "• /start\n"
+            "• /balance یا موجودی\n"
+            "• استخراج\n"
+            "• /convert 150\n"
+            "• /transfer 60 (روی پیام طرف Reply کن)\n"
+        )
+        await query.edit_message_text(text)
+        return
+
+    if data_key == "convert":
+        await convert_button(update, context)
+        return
+
+    if data_key == "transfer_help":
+        await transfer_help(update, context)
+        return
+
+
+# =========================
+# تشخیص پیام متنی
+# =========================
+async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+
+    text = update.message.text.strip()
+
+    if text in MINE_WORDS:
+        await mine_command(update, context)
+        return
+
+    if text == "موجودی":
+        await balance_command(update, context)
+        return
+
+    if text.startswith("تبدیل "):
+        parts = text.split(maxsplit=1)
+        if len(parts) == 2:
+            context.args = [parts[1]]
+            await convert_command(update, context)
+        return
+
+    if text.startswith("انتقال "):
+        parts = text.split(maxsplit=1)
+        if len(parts) == 2:
+            context.args = [parts[1]]
+            await transfer_command(update, context)
+        return
+
+
+# =========================
+# main
+# =========================
+def main():
+    load_data()
+
+    app = Application.builder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("balance", balance_command))
+    app.add_handler(CommandHandler("convert", convert_command))
+    app.add_handler(CommandHandler("transfer", transfer_command))
+
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
+
+    print("ربات در حال اجراست...")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
