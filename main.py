@@ -1,468 +1,271 @@
-// ============================================================
-// ربات ساده هوش مصنوعی بله (Bale) — Cloudflare Worker
-// فقط از Workers AI خود کلادفلر استفاده می‌کنه (بدون Gemini/Groq)
-//
-// متغیرهای محیطی لازم (Settings → Variables and Secrets):
-//   BALE_BOT_TOKEN  — توکن ربات (از botfather@ در بله بگیر)
-//   WORKER_DOMAIN   — دامنه ورکر، مثلاً hamedai.xxx.workers.dev
-//
-// Bindings لازم (Settings → Bindings):
-//   AI   → Workers AI
-//   KV   → یک KV Namespace (برای ذخیره تاریخچه و مدل انتخابی هر کاربر)
-//
-// بعد از دیپلوی، یک‌بار این آدرس رو باز کن تا webhook ثبت بشه:
-//   https://<WORKER_DOMAIN>/setWebhook
-// ============================================================
+import time
+import random
+import sqlite3
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+import undetected_chromedriver as uc 
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, CallbackQueryHandler
 
-// مدل‌های متنی Workers AI که ربات ازشون استفاده می‌کنه.
-// نکته: مدل‌های خانواده GPT-OSS با فرمت «Responses API» جواب میدن
-// (ساختار output به‌جای رشته ساده response)، برای همین تابع
-// extractText پایین‌تر هر دو فرمت رو پشتیبانی می‌کنه.
-const MODELS = [
-  { id: 'gpt120',   name: '🟢 GPT-OSS 120B (قوی‌ترین)', model: '@cf/openai/gpt-oss-120b' },
-  { id: 'gemma',    name: '🔵 Gemma 4 27B',              model: '@cf/google/gemma-4-26b-a4b-it' },
-  { id: 'qwen',     name: '🟣 Qwen3 30B',                model: '@cf/qwen/qwen3-30b-a3b-fp8' },
-  { id: 'llama',    name: '🟠 Llama 4 Scout',            model: '@cf/meta/llama-4-scout-17b-16e-instruct' },
-  { id: 'deepseek', name: '🔴 DeepSeek R1 (استدلالی)',   model: '@cf/deepseek-ai/deepseek-r1-distill-qwen-32b' },
-  { id: 'glm',      name: '🟡 GLM-4.7 Flash (کدنویسی)',  model: '@cf/zai-org/glm-4.7-flash' },
-];
+# --- تنظیمات ---
+TOKEN = "887772753:PoZnCJDYWukKmJ2FQmiD-YVRtadE018GV2w"
+ADMIN_ID = 1949738322  # آیدی شما
 
-// دو مدل تصویرسازی، هر دو رایگان و میزبانی خود کلادفلر (بدون نیاز به دسترسی Partner):
-// یکی سریع برای استفاده روزمره، یکی با جزئیات بیشتر و کندتر
-const IMAGE_MODEL_FAST = '@cf/black-forest-labs/flux-1-schnell';
-const IMAGE_MODEL_HQ   = '@cf/stabilityai/stable-diffusion-xl-base-1.0';
-const DEFAULT_MODEL_ID = 'qwen'; // پایدارترین و سریع‌ترین مدل به‌عنوان پیش‌فرض
-const MAX_HISTORY = 8; // تعداد پیام‌هایی که در حافظه هر کاربر نگه داشته میشه (۴ رفت‌وبرگشت)
-const HISTORY_TTL = 60 * 60 * 24 * 7; // یک هفته
+# وضعیت‌های گفتگو
+SETTING_USER, SETTING_PASS, WAITING_FOR_DATA, WAITING_FOR_ID_SEARCH, ADMIN_MANAGE_ID = range(5)
 
-function baleApi(token) {
-  return `https://tapi.bale.ai/bot${token}`;
-}
+# --- مدیریت دیتابیس ---
+def init_db():
+    conn = sqlite3.connect('users_data.db')
+    c = conn.cursor()
+    # جدول کاربران: اضافه شدن ستون is_approved
+    c.execute('''CREATE TABLE IF NOT EXISTS users 
+                 (user_id INTEGER PRIMARY KEY, username TEXT, password TEXT, is_approved INTEGER DEFAULT 0)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS cargo 
+                 (user_id INTEGER, driver_id TEXT, weight TEXT, origin TEXT, dest TEXT, hour TEXT)''')
+    conn.commit()
+    conn.close()
 
-// ------------------------------------------------------------
-// ورودی اصلی Worker
-// ------------------------------------------------------------
-export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
+def check_approval(user_id):
+    conn = sqlite3.connect('users_data.db')
+    c = conn.cursor()
+    c.execute("SELECT is_approved FROM users WHERE user_id = ?", (user_id,))
+    result = c.fetchone()
+    conn.close()
+    return result[0] if result else 0
 
-    if (request.method === 'GET' && url.pathname === '/setWebhook') {
-      return setWebhook(env);
-    }
+def set_approval(user_id, status):
+    conn = sqlite3.connect('users_data.db')
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO users (user_id, is_approved) VALUES (?, ?)", (user_id, status))
+    conn.commit()
+    conn.close()
 
-    if (request.method !== 'POST') {
-      return new Response(renderStatusPage(), {
-        headers: { 'Content-Type': 'text/html; charset=utf-8' },
-      });
-    }
+# (توابع ذخیره یوزر/پسورد و بارها مشابه قبل هستند اما با چک کردن مجوز)
+def save_user_credentials(user_id, username, password):
+    conn = sqlite3.connect('users_data.db')
+    c = conn.cursor()
+    c.execute("UPDATE users SET username = ?, password = ? WHERE user_id = ?", (username, password, user_id))
+    conn.commit()
+    conn.close()
 
-    let update;
-    try {
-      update = await request.json();
-    } catch (err) {
-      console.error('Invalid JSON body:', err);
-      return new Response('Bad Request', { status: 400 });
-    }
+def get_user_credentials(user_id):
+    conn = sqlite3.connect('users_data.db')
+    c = conn.cursor()
+    c.execute("SELECT username, password FROM users WHERE user_id = ?", (user_id,))
+    result = c.fetchone()
+    conn.close()
+    return result
 
-    try {
-      await handleUpdate(update, env);
-    } catch (err) {
-      console.error('Error handling update:', err);
-    }
+def save_cargo(user_id, driver_id, weight, origin, dest, hour):
+    conn = sqlite3.connect('users_data.db')
+    c = conn.cursor()
+    c.execute("INSERT INTO cargo VALUES (?, ?, ?, ?, ?, ?)", (user_id, driver_id, weight, origin, dest, hour))
+    conn.commit()
+    conn.close()
 
-    return new Response('OK');
-  },
-};
+def get_user_cargos(user_id):
+    conn = sqlite3.connect('users_data.db')
+    c = conn.cursor()
+    c.execute("SELECT driver_id, weight, origin, dest, hour FROM cargo WHERE user_id = ?", (user_id,))
+    results = c.fetchall()
+    conn.close()
+    return results
 
-async function setWebhook(env) {
-  const res = await fetch(`${baleApi(env.BALE_BOT_TOKEN)}/setWebhook`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url: `https://${env.WORKER_DOMAIN}` }),
-  });
-  const data = await res.json();
-  return new Response(JSON.stringify(data, null, 2), {
-    headers: { 'Content-Type': 'application/json' },
-  });
-}
+def clear_user_cargos(user_id):
+    conn = sqlite3.connect('users_data.db')
+    c = conn.cursor()
+    c.execute("DELETE FROM cargo WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
 
-function renderStatusPage() {
-  const modelRows = MODELS.map(
-    (m) => `<li><span class="name">${m.name}</span><code>${m.model}</code></li>`
-  ).join('');
+# --- بخش اتوماسیون سایت (بدون تغییر) ---
+def process_baarbarg_entries(user_id):
+    creds = get_user_credentials(user_id)
+    if not creds: return "❌ ابتدا یوزر و پسورد را تنظیم کنید."
+    username, password = creds
+    cargos = get_user_cargos(user_id)
+    if not cargos: return "⚠️ باری برای ثبت نیست."
+    
+    options = uc.ChromeOptions()
+    options.add_argument('--headless')
+    try:
+        driver = uc.Chrome(options=options)
+        driver.get("https://baarbarg.ir/login")
+        time.sleep(2)
+        driver.find_element(By.NAME, "username").send_keys(username)
+        driver.find_element(By.NAME, "password").send_keys(password)
+        driver.find_element(By.ID, "login-button").click()
+        time.sleep(3)
+        success = 0
+        for cargo in cargos:
+            driver.get(f"https://baarbarg.ir/entry/{cargo[0]}")
+            time.sleep(2)
+            driver.find_element(By.ID, "weight").send_keys(cargo[1])
+            driver.find_element(By.ID, "origin").send_keys(cargo[2])
+            driver.find_element(By.ID, "destination").send_keys(cargo[3])
+            driver.find_element(By.ID, "hour").send_keys(cargo[4])
+            driver.find_element(By.ID, "submit").click()
+            success += 1
+            time.sleep(3)
+        return f"✅ {success} مورد ثبت شد."
+    except Exception as e: return f"❌ خطا: {str(e)}"
+    finally: driver.quit()
 
-  return `<!DOCTYPE html>
-<html lang="fa" dir="rtl">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ربات هوش مصنوعی بله</title>
-<style>
-  body {
-    font-family: Tahoma, Vazirmatn, sans-serif;
-    background: #0f172a;
-    color: #e2e8f0;
-    margin: 0;
-    padding: 40px 20px;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-  }
-  .card {
-    background: #1e293b;
-    border-radius: 16px;
-    padding: 28px;
-    max-width: 480px;
-    width: 100%;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.3);
-    margin-bottom: 20px;
-  }
-  h1 { font-size: 20px; margin-top: 0; }
-  h2 { font-size: 16px; color: #94a3b8; margin-bottom: 10px; }
-  button {
-    background: linear-gradient(135deg, #22c55e, #16a34a);
-    color: white;
-    border: none;
-    padding: 14px 22px;
-    font-size: 16px;
-    border-radius: 10px;
-    cursor: pointer;
-    width: 100%;
-    font-family: inherit;
-    transition: transform 0.1s ease;
-  }
-  button:hover { transform: translateY(-1px); }
-  button:disabled { opacity: 0.6; cursor: default; }
-  #result {
-    margin-top: 14px;
-    font-size: 13px;
-    white-space: pre-wrap;
-    word-break: break-word;
-    background: #0f172a;
-    border-radius: 8px;
-    padding: 10px;
-    display: none;
-  }
-  ul { list-style: none; padding: 0; margin: 0; }
-  li {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 8px 0;
-    border-bottom: 1px solid #334155;
-    font-size: 14px;
-  }
-  li:last-child { border-bottom: none; }
-  .name { color: #e2e8f0; }
-  code {
-    color: #94a3b8;
-    font-size: 11px;
-    direction: ltr;
-    text-align: left;
-  }
-  .status { color: #22c55e; font-size: 14px; margin-bottom: 16px; }
-</style>
-</head>
-<body>
+# --- دکمه‌ها ---
+def main_menu_keyboard():
+    return ReplyKeyboardMarkup([[KeyboardButton("⚙️ تنظیمات حساب")], [KeyboardButton("➕ افزودن بار")], [KeyboardButton("🚀 ارسال به سایت")], [KeyboardButton("🔍 سرچ راننده")], [KeyboardButton("❓ راهنما")]], resize_keyboard=True)
 
-<div class="card">
-  <div class="status">🟢 ربات فعاله</div>
-  <h1>فعال‌سازی Webhook</h1>
-  <button id="btn" onclick="setupWebhook()">فعال‌سازی Webhook</button>
-  <div id="result"></div>
-</div>
+def admin_keyboard():
+    return ReplyKeyboardMarkup([[KeyboardButton("📊 آمار کاربران")], [KeyboardButton("👁️ نظارت بر فعالیت‌ها")], [KeyboardButton("🆔 مدیریت مجوزها")], [KeyboardButton("🏠 بازگشت به منوی کاربر")]], resize_keyboard=True)
 
-<div class="card">
-  <h2>🤖 مدل‌های متنی فعال</h2>
-  <ul>${modelRows}</ul>
-</div>
+# --- توابع ربات ---
 
-<div class="card">
-  <h2>🖼️ مدل‌های ساخت تصویر فعال</h2>
-  <ul>
-    <li><span class="name">⚡ سریع (/image)</span><code>${IMAGE_MODEL_FAST}</code></li>
-    <li><span class="name">✨ کیفیت بالا (/imagehd)</span><code>${IMAGE_MODEL_HQ}</code></li>
-  </ul>
-</div>
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    user_name = update.message.from_user.full_name
 
-<script>
-async function setupWebhook() {
-  const btn = document.getElementById('btn');
-  const result = document.getElementById('result');
-  btn.disabled = true;
-  btn.textContent = 'در حال فعال‌سازی...';
-  result.style.display = 'block';
-  result.textContent = '...';
-  try {
-    const res = await fetch('/setWebhook');
-    const data = await res.json();
-    result.textContent = JSON.stringify(data, null, 2);
-    btn.textContent = data.ok ? '✅ فعال شد' : '⚠️ خطا، دوباره امتحان کن';
-  } catch (err) {
-    result.textContent = 'خطا: ' + err.message;
-    btn.textContent = '⚠️ خطا، دوباره امتحان کن';
-  }
-  btn.disabled = false;
-}
-</script>
+    if user_id == ADMIN_ID:
+        await update.message.reply_text("👋 خوش آمدید رئیس! شما به عنوان ادمین شناخته شدید.", reply_markup=admin_keyboard())
+        return
 
-</body>
-</html>`;
-}
+    # بررسی مجوز کاربر
+    if check_approval(user_id) == 1:
+        await update.message.reply_text("👋 خوش آمدید! دسترسی شما تایید شده است.", reply_markup=main_menu_keyboard())
+    else:
+        # ذخیره کاربر در دیتابیس با وضعیت تایید نشده
+        conn = sqlite3.connect('users_data.db')
+        conn.execute("INSERT OR IGNORE INTO users (user_id, is_approved) VALUES (?, 0)", (user_id,))
+        conn.commit()
+        conn.close()
 
-// ------------------------------------------------------------
-// پردازش پیام‌های ورودی از بله
-// ------------------------------------------------------------
-async function handleUpdate(update, env) {
-  if (update.callback_query) {
-    return handleCallback(update.callback_query, env);
-  }
-  if (update.message) {
-    return handleMessage(update.message, env);
-  }
-}
+        await update.message.reply_text("⚠️ این ربات اشتراکی است. درخواست شما برای سازنده ارسال شد. در صورت تایید، مجوز استفاده برای شما فعال خواهد شد.")
+        
+        # ارسال اعلان برای ادمین
+        keyboard = [
+            [InlineKeyboardButton("✅ تایید", callback_data=f"approve_{user_id}"),
+             InlineKeyboardButton("❌ رد", callback_data=f"reject_{user_id}")]
+        ]
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"🔔 **درخواست جدید!**\n\nکاربر: {user_name}\nآیدی: `{user_id}`\nآیا مجوز استفاده را می‌دهید؟",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
 
-async function handleMessage(message, env) {
-  const chatId = message.chat.id;
-  const text = (message.text || '').trim();
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data
+    await query.answer()
 
-  if (text === '/start') {
-    await sendMessage(chatId, 'سلام 👋 من یه ربات هوش مصنوعیم که روی Cloudflare Workers AI اجرا میشم.\nبرای انتخاب مدل از /model استفاده کن و سوالت رو بپرس.\nبرای ساخت تصویر سریع: /image توضیح تصویر\nبرای ساخت تصویر باکیفیت‌تر (کندتر): /imagehd توضیح تصویر', env);
-    await sendModelPicker(chatId, env);
-    return;
-  }
+    if data.startswith("approve_"):
+        user_id = int(data.split("_")[1])
+        set_approval(user_id, 1)
+        await query.edit_message_text(f"✅ کاربر {user_id} تایید شد.")
+        await context.bot.send_message(chat_id=user_id, text="🎉 تبریک! دسترسی شما به ربات تایید شد. حالا می‌توانید با زدن /start وارد شوید.")
 
-  if (text === '/model') {
-    await sendModelPicker(chatId, env);
-    return;
-  }
+    elif data.startswith("reject_"):
+        user_id = int(data.split("_")[1])
+        await query.edit_message_text(f"❌ درخواست کاربر {user_id} رد شد.")
+        await context.bot.send_message(chat_id=user_id, text="😔 متاسفانه درخواست شما رد شد.")
 
-  if (text === '/reset') {
-    await env.KV.delete(`history:${chatId}`);
-    await sendMessage(chatId, '✅ حافظه مکالمه پاک شد.', env);
-    return;
-  }
+async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    user_id = update.message.from_user.id
 
-  if (text === '/image' || text.startsWith('/image ')) {
-    const prompt = text.slice('/image'.length).trim();
-    if (!prompt) {
-      await sendMessage(chatId, 'بعد از دستور /image توضیح تصویر رو بنویس.\nمثال: /image یک گربه فضانورد روی ماه\n\nبرای کیفیت بالاتر (کندتر) از /imagehd استفاده کن.', env);
-      return;
-    }
-    await sendChatAction(chatId, env, 'upload_photo');
-    await replyWithImage(chatId, prompt, IMAGE_MODEL_FAST, env);
-    return;
-  }
+    if user_id == ADMIN_ID:
+        if text == "📊 آمار کاربران":
+            conn = sqlite3.connect('users_data.db')
+            count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            approved = conn.execute("SELECT COUNT(*) FROM users WHERE is_approved=1").fetchone()[0]
+            conn.close()
+            await update.message.reply_text(f"📈 کل کاربران: {count}\n✅ کاربران تایید شده: {approved}")
+            return
+        elif text == "👁️ نظارت بر فعالیت‌ها":
+            conn = sqlite3.connect('users_data.db')
+            logs = conn.execute("SELECT user_id, driver_id, weight FROM cargo LIMIT 10").fetchall()
+            conn.close()
+            log_text = "\n".join([f"👤 کاربر {l[0]} در حال ثبت بار برای {l[1]} (وزن: {l[2]})" for l in logs])
+            await update.message.reply_text(f"👀 آخرین فعالیت‌ها:\n\n{log_text if log_text else 'فعالیتی یافت نشد.'}")
+            return
+        elif text == "🆔 مدیریت مجوزها":
+            await update.message.reply_text("لطفاً آیدی عددی کاربر را بفرستید تا مجوز او را تغییر دهم:")
+            return ADMIN_MANAGE_ID
+        elif text == "🏠 بازگشت به منوی کاربر":
+            await update.message.reply_text("بازگشت به منوی کاربر...", reply_markup=main_menu_keyboard())
+            return
 
-  if (text === '/imagehd' || text.startsWith('/imagehd ')) {
-    const prompt = text.slice('/imagehd'.length).trim();
-    if (!prompt) {
-      await sendMessage(chatId, 'بعد از دستور /imagehd توضیح تصویر رو بنویس.\nمثال: /imagehd یک منظره کوهستانی در غروب\n(این مدل باکیفیت‌تر ولی کندتره)', env);
-      return;
-    }
-    await sendChatAction(chatId, env, 'upload_photo');
-    await replyWithImage(chatId, prompt, IMAGE_MODEL_HQ, env);
-    return;
-  }
+    # چک کردن مجوز برای کاربران عادی
+    if check_approval(user_id) == 0:
+        await update.message.reply_text("❌ شما هنوز مجوز استفاده از ربات را ندارید.")
+        return
 
-  if (!text) {
-    await sendMessage(chatId, 'فعلاً فقط پیام متنی پشتیبانی میشه.', env);
-    return;
-  }
+    if text == "⚙️ تنظیمات حساب":
+        await update.message.reply_text("نام کاربری سایت را وارد کنید:")
+        return SETTING_USER
+    elif text == "➕ افزودن بار":
+        await update.message.reply_text("فرمت: `آیدی, وزن, مبدا, مقصد, ساعت`", parse_mode='Markdown')
+        return WAITING_FOR_DATA
+    elif text == "🚀 ارسال به سایت":
+        await update.message.reply_text("⏳ در حال ارسال...")
+        res = process_baarbarg_entries(user_id)
+        await update.message.reply_text(res)
+        if "✅" in res: clear_user_cargos(user_id)
+    elif text == "🔍 سرچ راننده":
+        await update.message.reply_text("آیدی راننده را بفرستید:")
+        return WAITING_FOR_ID_SEARCH
 
-  await sendChatAction(chatId, env);
-  await replyWithAI(chatId, text, env);
-}
+async def manage_id_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        target_id = int(update.message.text)
+        set_approval(target_id, 1)
+        await update.message.reply_text(f"✅ مجوز برای کاربر {target_id} فعال شد.")
+    except:
+        await update.message.reply_text("⚠️ لطفاً فقط آیدی عددی را بفرستید.")
+    return ConversationHandler.END
 
-async function handleCallback(cb, env) {
-  const chatId = cb.message.chat.id;
-  const data = cb.data || '';
+# (توابع set_user, set_pass, handle_add_data مشابه کد قبلی هستند)
+async def set_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['temp_user'] = update.message.text
+    await update.message.reply_text("رمز عبور سایت را وارد کنید:")
+    return SETTING_PASS
 
-  if (data.startsWith('model:')) {
-    const modelId = data.split(':')[1];
-    const modelDef = MODELS.find((m) => m.id === modelId);
-    if (!modelDef) return;
+async def set_pass(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    save_user_credentials(user_id, context.user_data['temp_user'], update.message.text)
+    await update.message.reply_text("✅ حساب ذخیره شد!", reply_markup=main_menu_keyboard())
+    return ConversationHandler.END
 
-    await env.KV.put(`model:${chatId}`, modelId);
-    await answerCallback(cb.id, env, `مدل ${modelDef.name} انتخاب شد`);
-    await sendMessage(chatId, `✅ مدل فعال: ${modelDef.name}\nحالا سوالت رو بپرس.`, env);
-  }
-}
+async def handle_add_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    try:
+        p = [x.strip() for x in update.message.text.split(',')]
+        if len(p) < 5: raise ValueError
+        save_cargo(user_id, p[0], p[1], p[2], p[3], p[4])
+        await update.message.reply_text(f"📦 ذخیره شد.", reply_markup=main_menu_keyboard())
+    except: await update.message.reply_text("⚠️ فرمت اشتباه!")
+    return ConversationHandler.END
 
-// ------------------------------------------------------------
-// فراخوانی Workers AI و مدیریت تاریخچه مکالمه
-// ------------------------------------------------------------
-async function replyWithAI(chatId, text, env) {
-  const modelId = (await env.KV.get(`model:${chatId}`)) || DEFAULT_MODEL_ID;
-  const modelDef = MODELS.find((m) => m.id === modelId) || MODELS.find((m) => m.id === DEFAULT_MODEL_ID);
+def main():
+    init_db()
+    app = Application.builder().token(TOKEN).build()
 
-  const history = await getHistory(chatId, env);
-  history.push({ role: 'user', content: text });
+    conv_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu)],
+        states={
+            SETTING_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_user)],
+            SETTING_PASS: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_pass)],
+            WAITING_FOR_DATA: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_data)],
+            ADMIN_MANAGE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, manage_id_action)],
+        },
+        fallbacks=[CommandHandler('start', start)],
+    )
 
-  try {
-    const result = await env.AI.run(modelDef.model, {
-      messages: [
-        { role: 'system', content: 'You are a helpful, concise assistant. Reply in the same language the user writes in.' },
-        ...history,
-      ],
-      max_tokens: 1536,
-    });
+    app.add_handler(CommandHandler('start', start))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(conv_handler)
+    app.run_polling()
 
-    const reply = extractText(result);
-
-    if (!reply) {
-      console.error('Empty/unrecognized AI response shape:', JSON.stringify(result).slice(0, 500));
-      await sendMessage(chatId, `⚠️ مدل ${modelDef.name} پاسخ قابل‌فهمی برنگردوند. با /model یه مدل دیگه رو امتحان کن.`, env);
-      return;
-    }
-
-    history.push({ role: 'assistant', content: reply });
-    await saveHistory(chatId, history, env);
-    await sendMessage(chatId, `${modelDef.name}\n\n${reply}`, env);
-  } catch (err) {
-    console.error('AI run error:', err && err.message ? err.message : String(err));
-    await sendMessage(chatId, '⚠️ خطا در دریافت پاسخ از مدل. چند لحظه دیگه دوباره امتحان کن یا با /model مدل رو عوض کن.', env);
-  }
-}
-
-// استخراج متن پاسخ از سه فرمت متفاوتی که Workers AI ممکنه برگردونه:
-//  ۱) فرمت کلاسیک chat-completion:            { response: "متن پاسخ" }
-//  ۲) فرمت OpenAI Chat Completions (GPT-OSS، GLM، DeepSeek):
-//        { choices: [ { message: { content: "متن پاسخ", reasoning_content: "زنجیره فکر" } } ] }
-//  ۳) فرمت Responses API:                     { output: [ { type: "message", content: [ { type: "output_text", text: "..." } ] }, ... ] }
-function extractText(result) {
-  if (!result) return null;
-
-  if (typeof result.response === 'string' && result.response.trim()) {
-    return stripThinking(result.response);
-  }
-
-  if (Array.isArray(result.choices) && result.choices.length) {
-    const msg = result.choices[0].message;
-    if (msg && typeof msg.content === 'string' && msg.content.trim()) {
-      return stripThinking(msg.content);
-    }
-  }
-
-  if (Array.isArray(result.output)) {
-    for (const item of result.output) {
-      if (item.type === 'message' && Array.isArray(item.content)) {
-        const part = item.content.find(
-          (c) => c.type === 'output_text' || c.type === 'text'
-        );
-        if (part && part.text) return stripThinking(part.text);
-      }
-    }
-  }
-
-  if (typeof result.result === 'string' && result.result.trim()) {
-    return stripThinking(result.result);
-  }
-
-  return null;
-}
-
-// مدل‌های استدلالی (مثل DeepSeek R1) گاهی زنجیره فکر خودشون رو
-// داخل تگ <think>...</think> برمی‌گردونن؛ اینو قبل از ارسال به کاربر حذف می‌کنیم.
-function stripThinking(text) {
-  return text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-}
-
-async function getHistory(chatId, env) {
-  const raw = await env.KV.get(`history:${chatId}`);
-  return raw ? JSON.parse(raw) : [];
-}
-
-async function saveHistory(chatId, history, env) {
-  const trimmed = history.slice(-MAX_HISTORY);
-  await env.KV.put(`history:${chatId}`, JSON.stringify(trimmed), {
-    expirationTtl: HISTORY_TTL,
-  });
-}
-
-// ------------------------------------------------------------
-// توابع کمکی برای صحبت با API بله
-// ------------------------------------------------------------
-async function sendMessage(chatId, text, env) {
-  await fetch(`${baleApi(env.BALE_BOT_TOKEN)}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text }),
-  });
-}
-
-async function sendChatAction(chatId, env, action = 'typing') {
-  await fetch(`${baleApi(env.BALE_BOT_TOKEN)}/sendChatAction`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, action }),
-  });
-}
-
-async function sendPhoto(chatId, imageBytes, caption, env) {
-  const form = new FormData();
-  form.append('chat_id', String(chatId));
-  if (caption) form.append('caption', caption.slice(0, 1000));
-  form.append('photo', new Blob([imageBytes], { type: 'image/jpeg' }), 'image.jpg');
-
-  await fetch(`${baleApi(env.BALE_BOT_TOKEN)}/sendPhoto`, {
-    method: 'POST',
-    body: form,
-  });
-}
-
-async function replyWithImage(chatId, prompt, model, env) {
-  try {
-    const result = await env.AI.run(model, {
-      prompt,
-      seed: Math.floor(Math.random() * 1000000),
-    });
-
-    let bytes = null;
-
-    // فرمت Flux: { image: "base64رشته" }
-    if (result && typeof result.image === 'string') {
-      const binary = atob(result.image);
-      bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    }
-    // فرمت مدل‌های Stable Diffusion: بایت خام تصویر (Response/ReadableStream)
-    else if (result) {
-      const buf = await new Response(result).arrayBuffer();
-      if (buf && buf.byteLength) bytes = new Uint8Array(buf);
-    }
-
-    if (!bytes || !bytes.length) {
-      await sendMessage(chatId, '⚠️ ساخت تصویر جواب قابل‌فهمی برنگردوند.', env);
-      return;
-    }
-
-    await sendPhoto(chatId, bytes, prompt, env);
-  } catch (err) {
-    console.error('Image gen error:', err && err.message ? err.message : String(err));
-    await sendMessage(chatId, '⚠️ خطا در ساخت تصویر. دوباره امتحان کن (یا مدل دیگه‌ای رو امتحان کن).', env);
-  }
-}
-
-async function answerCallback(callbackId, env, text) {
-  await fetch(`${baleApi(env.BALE_BOT_TOKEN)}/answerCallbackQuery`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ callback_query_id: callbackId, text }),
-  });
-}
-
-async function sendModelPicker(chatId, env) {
-  const keyboard = {
-    inline_keyboard: MODELS.map((m) => [{ text: m.name, callback_data: `model:${m.id}` }]),
-  };
-  await fetch(`${baleApi(env.BALE_BOT_TOKEN)}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text: 'یکی از مدل‌ها رو انتخاب کن:',
-      reply_markup: keyboard,
-    }),
-  });
-}
+if __name__ == "__main__":
+    main()
+  
