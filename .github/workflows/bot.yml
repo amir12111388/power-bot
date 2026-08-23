@@ -1,3 +1,11 @@
+name: Run My Bot
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: # این بهت اجازه می‌ده دستی دکمه Run رو بزنی
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -10,23 +18,15 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: List files (Check location)
-        run: ls -R  # این دستور بهمون نشون می‌ده فایل‌ها کجان
-
       - name: Install dependencies
         run: |
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            echo "No requirements.txt found, skipping..."
-          fi
+          pip install -r requirements.txt || echo "Requirements file not found, skipping install."
 
       - name: Run the Bot
-        shell: bash
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
         run: |
-          python3 main.py 2>&1  # خروجی خطا رو هم چاپ کن
+          python3 main.py
           
