@@ -1,25 +1,34 @@
-name: Run Balle Bot
+    name: Run Bale Bot on Push # نام Workflow
 
-on:
-  push:
-    branches: [ main ]
-  workflow_dispatch: # این دکمه باعث می‌شود دستی هم بتوانی ربات را اجرا کنی
+    on:
+      push: # هر وقت کدی به شاخه main پوش شود، اجرا می‌شود
+        branches: [ main ]
+      workflow_dispatch: # این امکان را می‌دهد که دستی از صفحه Actions اجرا کنی
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@11bd708027c5415774a34b295f795764d858348d
+    jobs:
+      run_bot: # نام Job
+        runs-on: ubuntu-latest # سیستم عامل که Job روی آن اجرا می‌شود (یک سرور مجازی اوبونتو)
+        timeout-minutes: 360 # حداکثر زمان اجرا به دقیقه (۶ ساعت). برای تست کافی است.
 
-      - name: Set up Python
-        uses: actions/setup-python@0b93645e5efa73550a3b04c81f687498c4746014
-        with:
-          python-version: '3.9'
+        steps:
+          - name: Checkout code # مرحله اول: دانلود کدهای ریپازیتوری
+            uses: actions/checkout@v4 # از اکشن آماده برای دانلود کد استفاده می‌کند
 
-      - name: Install dependencies
-        run: pip install telethon # یا هر کتابخانه‌ای که استفاده می‌کنی
+          - name: Set up Python # مرحله دوم: نصب پایتون
+            uses: actions/setup-python@v5
+            with:
+              python-version: '3.9' # ورژن پایتون مورد نیازت را اینجا مشخص کن
 
-      - name: Run Bot
-        run: python main.py # اسم فایل اصلی رباتت
-        
+          - name: Install dependencies # مرحله سوم: نصب کتابخانه‌های مورد نیاز
+            run: pip install -r requirements.txt # از فایل requirements.txt استفاده می‌کند
+
+          - name: Store Secrets in Environment Variables # مرحله چهارم: تنظیم کلیدهای امنیتی
+            env:
+              BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+              API_ID: ${{ secrets.API_ID }}
+              API_HASH: ${{ secrets.API_HASH }}
+            run: echo "Secrets are set" # این خط فقط برای این است که مرحله موفقیت‌آمیز دیده شود
+
+          - name: Run the Bot # مرحله پنجم: اجرای اسکریپت ربات
+            run: python main.py # اینجا نام فایل اصلی رباتت را بنویس (مثلاً main.py یا bot.py)
+            
