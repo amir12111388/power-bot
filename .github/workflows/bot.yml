@@ -1,34 +1,33 @@
-    name: Run Bale Bot on Push # نام Workflow
+name: Run Bale Bot on Push
 
-    on:
-      push: # هر وقت کدی به شاخه main پوش شود، اجرا می‌شود
-        branches: [ main ]
-      workflow_dispatch: # این امکان را می‌دهد که دستی از صفحه Actions اجرا کنی
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
 
-    jobs:
-      run_bot: # نام Job
-        runs-on: ubuntu-latest # سیستم عامل که Job روی آن اجرا می‌شود (یک سرور مجازی اوبونتو)
-        timeout-minutes: 360 # حداکثر زمان اجرا به دقیقه (۶ ساعت). برای تست کافی است.
+jobs:
+  run_bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
 
-        steps:
-          - name: Checkout code # مرحله اول: دانلود کدهای ریپازیتوری
-            uses: actions/checkout@v4 # از اکشن آماده برای دانلود کد استفاده می‌کند
+    steps:
+      - name: Checkout code
+        # استفاده از SHA دقیق و استاندارد برای checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-          - name: Set up Python # مرحله دوم: نصب پایتون
-            uses: actions/setup-python@v5
-            with:
-              python-version: '3.9' # ورژن پایتون مورد نیازت را اینجا مشخص کن
+      - name: Set up Python
+        # استفاده از SHA دقیق و استاندارد برای setup-python
+        uses: actions/setup-python@0b93645e5efa73187a3b5057f311c16828230537
+        with:
+          python-version: '3.9'
 
-          - name: Install dependencies # مرحله سوم: نصب کتابخانه‌های مورد نیاز
-            run: pip install -r requirements.txt # از فایل requirements.txt استفاده می‌کند
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
-          - name: Store Secrets in Environment Variables # مرحله چهارم: تنظیم کلیدهای امنیتی
-            env:
-              BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-              API_ID: ${{ secrets.API_ID }}
-              API_HASH: ${{ secrets.API_HASH }}
-            run: echo "Secrets are set" # این خط فقط برای این است که مرحله موفقیت‌آمیز دیده شود
-
-          - name: Run the Bot # مرحله پنجم: اجرای اسکریپت ربات
-            run: python main.py # اینجا نام فایل اصلی رباتت را بنویس (مثلاً main.py یا bot.py)
-            
+      - name: Run the Bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+        run: python main.py
+        
