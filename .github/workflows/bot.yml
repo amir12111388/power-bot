@@ -4,31 +4,36 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch: # اجازه می‌دهد دستی دکمه Run را بزنی
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # استفاده از SHA دقیق برای Checkout به جای v4
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      # استفاده از SHA دقیق برای Setup Python به جای v5
       - name: Setup Python
         uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
           python-version: '3.10'
 
-      - name: List files (Check location)
-        run: ls -R
+      - name: Check Environment
+        run: |
+          echo "Checking Python version..."
+          python3 --version
+          echo "Checking current directory content..."
+          ls -la
 
       - name: Install dependencies
         run: |
+          echo "Attempting to install requirements..."
+          pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            echo "No requirements.txt found, skipping install."
+            echo "CRITICAL ERROR: requirements.txt not found!"
+            exit 1
           fi
 
       - name: Run the Bot
@@ -37,5 +42,6 @@ jobs:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
         run: |
-          python3 main.py 2>&1
+          echo "Starting Python execution..."
+          python3 main.py
           
