@@ -4,23 +4,32 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch: # این بهت اجازه می‌ده دستی دکمه Run رو بزنی
+  workflow_dispatch: # اجازه می‌دهد دستی دکمه Run را بزنی
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # استفاده از SHA دقیق برای Checkout به جای v4
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
+      # استفاده از SHA دقیق برای Setup Python به جای v5
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
           python-version: '3.10'
 
+      - name: List files (Check location)
+        run: ls -R
+
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt || echo "Requirements file not found, skipping install."
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            echo "No requirements.txt found, skipping install."
+          fi
 
       - name: Run the Bot
         env:
@@ -28,5 +37,5 @@ jobs:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
         run: |
-          python3 main.py
+          python3 main.py 2>&1
           
