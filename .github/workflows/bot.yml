@@ -1,38 +1,32 @@
-name: Run Bale Bot on Push
-
-on:
-  push:
-    branches: [ main ]
-  workflow_dispatch:
-
 jobs:
-  run_bot:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-
     steps:
-      # به جای checkout اکشن، خودمون دستی کد رو کش می‌کنیم
-      - name: Checkout code manually
-        run: git clone https://github.com/${{ github.repository }}.git .
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      # به جای setup-python، خودمان پایتون را نصب می‌کنیم
-      - name: Install Python manually
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y python3 python3-pip
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: List files (Check location)
+        run: ls -R  # این دستور بهمون نشون می‌ده فایل‌ها کجان
 
       - name: Install dependencies
         run: |
-          python3 -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip3 install -r requirements.txt; fi
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            echo "No requirements.txt found, skipping..."
+          fi
 
       - name: Run the Bot
+        shell: bash
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
         run: |
-          echo "--- Starting Bot ---"
-          python3 main.py 2>&1
-          echo "--- Bot Process Finished with status $? ---"
+          python3 main.py 2>&1  # خروجی خطا رو هم چاپ کن
           
