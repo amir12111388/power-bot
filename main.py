@@ -3,13 +3,14 @@ import random
 import sqlite3
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-import undetected_chromedriver as uc 
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, CallbackQueryHandler
+import undetected_chromedriver as uc
+from balebot import BaleBot, Update, Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
+from balebot.handlers import CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler
+from balebot.filters import TextFilter, CommandFilter
 
 # --- تنظیمات ---
-TOKEN = "887772753:PoZnCJDYWukKmJ2FQmiD-YVRtadE018GV2w"
-ADMIN_ID = 1949738322  # آیدی شما
+TOKEN = "1745593874:4JG1g0nyvORx7xkG6OYlqCaO7WesOHoGtBY" BotFather بله بگیر
+ADMIN_ID = 1949738322  # ⚠️ آیدی عددی خودت در بله
 
 # وضعیت‌های گفتگو
 SETTING_USER, SETTING_PASS, WAITING_FOR_DATA, WAITING_FOR_ID_SEARCH, ADMIN_MANAGE_ID = range(5)
@@ -18,7 +19,6 @@ SETTING_USER, SETTING_PASS, WAITING_FOR_DATA, WAITING_FOR_ID_SEARCH, ADMIN_MANAG
 def init_db():
     conn = sqlite3.connect('users_data.db')
     c = conn.cursor()
-    # جدول کاربران: اضافه شدن ستون is_approved
     c.execute('''CREATE TABLE IF NOT EXISTS users 
                  (user_id INTEGER PRIMARY KEY, username TEXT, password TEXT, is_approved INTEGER DEFAULT 0)''')
     c.execute('''CREATE TABLE IF NOT EXISTS cargo 
@@ -41,7 +41,6 @@ def set_approval(user_id, status):
     conn.commit()
     conn.close()
 
-# (توابع ذخیره یوزر/پسورد و بارها مشابه قبل هستند اما با چک کردن مجوز)
 def save_user_credentials(user_id, username, password):
     conn = sqlite3.connect('users_data.db')
     c = conn.cursor()
@@ -120,40 +119,37 @@ def admin_keyboard():
     return ReplyKeyboardMarkup([[KeyboardButton("📊 آمار کاربران")], [KeyboardButton("👁️ نظارت بر فعالیت‌ها")], [KeyboardButton("🆔 مدیریت مجوزها")], [KeyboardButton("🏠 بازگشت به منوی کاربر")]], resize_keyboard=True)
 
 # --- توابع ربات ---
+bot = BaleBot(token=TOKEN)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context):
     user_id = update.message.from_user.id
     user_name = update.message.from_user.full_name
 
     if user_id == ADMIN_ID:
-        await update.message.reply_text("👋 خوش آمدید رئیس! شما به عنوان ادمین شناخته شدید.", reply_markup=admin_keyboard())
+        await update.message.reply("👋 خوش آمدید رئیس! شما به عنوان ادمین شناخته شدید.", reply_markup=admin_keyboard())
         return
 
-    # بررسی مجوز کاربر
     if check_approval(user_id) == 1:
-        await update.message.reply_text("👋 خوش آمدید! دسترسی شما تایید شده است.", reply_markup=main_menu_keyboard())
+        await update.message.reply("👋 خوش آمدید! دسترسی شما تایید شده است.", reply_markup=main_menu_keyboard())
     else:
-        # ذخیره کاربر در دیتابیس با وضعیت تایید نشده
         conn = sqlite3.connect('users_data.db')
         conn.execute("INSERT OR IGNORE INTO users (user_id, is_approved) VALUES (?, 0)", (user_id,))
         conn.commit()
         conn.close()
 
-        await update.message.reply_text("⚠️ این ربات اشتراکی است. درخواست شما برای سازنده ارسال شد. در صورت تایید، مجوز استفاده برای شما فعال خواهد شد.")
+        await update.message.reply("⚠️ این ربات اشتراکی است. درخواست شما برای سازنده ارسال شد. در صورت تایید، مجوز استفاده برای شما فعال خواهد شد.")
         
-        # ارسال اعلان برای ادمین
         keyboard = [
             [InlineKeyboardButton("✅ تایید", callback_data=f"approve_{user_id}"),
              InlineKeyboardButton("❌ رد", callback_data=f"reject_{user_id}")]
         ]
-        await context.bot.send_message(
+        await bot.send_message(
             chat_id=ADMIN_ID,
             text=f"🔔 **درخواست جدید!**\n\nکاربر: {user_name}\nآیدی: `{user_id}`\nآیا مجوز استفاده را می‌دهید؟",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_callback(update: Update, context):
     query = update.callback_query
     data = query.data
     await query.answer()
@@ -162,14 +158,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = int(data.split("_")[1])
         set_approval(user_id, 1)
         await query.edit_message_text(f"✅ کاربر {user_id} تایید شد.")
-        await context.bot.send_message(chat_id=user_id, text="🎉 تبریک! دسترسی شما به ربات تایید شد. حالا می‌توانید با زدن /start وارد شوید.")
+        await bot.send_message(chat_id=user_id, text="🎉 تبریک! دسترسی شما به ربات تایید شد. حالا می‌توانید با زدن /start وارد شوید.")
 
     elif data.startswith("reject_"):
         user_id = int(data.split("_")[1])
         await query.edit_message_text(f"❌ درخواست کاربر {user_id} رد شد.")
-        await context.bot.send_message(chat_id=user_id, text="😔 متاسفانه درخواست شما رد شد.")
+        await bot.send_message(chat_id=user_id, text="😔 متاسفانه درخواست شما رد شد.")
 
-async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_menu(update: Update, context):
     text = update.message.text
     user_id = update.message.from_user.id
 
@@ -179,93 +175,94 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
             approved = conn.execute("SELECT COUNT(*) FROM users WHERE is_approved=1").fetchone()[0]
             conn.close()
-            await update.message.reply_text(f"📈 کل کاربران: {count}\n✅ کاربران تایید شده: {approved}")
+            await update.message.reply(f"📈 کل کاربران: {count}\n✅ کاربران تایید شده: {approved}")
             return
         elif text == "👁️ نظارت بر فعالیت‌ها":
             conn = sqlite3.connect('users_data.db')
             logs = conn.execute("SELECT user_id, driver_id, weight FROM cargo LIMIT 10").fetchall()
             conn.close()
             log_text = "\n".join([f"👤 کاربر {l[0]} در حال ثبت بار برای {l[1]} (وزن: {l[2]})" for l in logs])
-            await update.message.reply_text(f"👀 آخرین فعالیت‌ها:\n\n{log_text if log_text else 'فعالیتی یافت نشد.'}")
+            await update.message.reply(f"👀 آخرین فعالیت‌ها:\n\n{log_text if log_text else 'فعالیتی یافت نشد.'}")
             return
         elif text == "🆔 مدیریت مجوزها":
-            await update.message.reply_text("لطفاً آیدی عددی کاربر را بفرستید تا مجوز او را تغییر دهم:")
+            await update.message.reply("لطفاً آیدی عددی کاربر را بفرستید تا مجوز او را تغییر دهم:")
             return ADMIN_MANAGE_ID
         elif text == "🏠 بازگشت به منوی کاربر":
-            await update.message.reply_text("بازگشت به منوی کاربر...", reply_markup=main_menu_keyboard())
+            await update.message.reply("بازگشت به منوی کاربر...", reply_markup=main_menu_keyboard())
             return
 
-    # چک کردن مجوز برای کاربران عادی
     if check_approval(user_id) == 0:
-        await update.message.reply_text("❌ شما هنوز مجوز استفاده از ربات را ندارید.")
+        await update.message.reply("❌ شما هنوز مجوز استفاده از ربات را ندارید.")
         return
 
     if text == "⚙️ تنظیمات حساب":
-        await update.message.reply_text("نام کاربری سایت را وارد کنید:")
+        await update.message.reply("نام کاربری سایت را وارد کنید:")
         return SETTING_USER
     elif text == "➕ افزودن بار":
-        await update.message.reply_text("فرمت: `آیدی, وزن, مبدا, مقصد, ساعت`", parse_mode='Markdown')
+        await update.message.reply("فرمت: `آیدی, وزن, مبدا, مقصد, ساعت`")
         return WAITING_FOR_DATA
     elif text == "🚀 ارسال به سایت":
-        await update.message.reply_text("⏳ در حال ارسال...")
+        await update.message.reply("⏳ در حال ارسال...")
         res = process_baarbarg_entries(user_id)
-        await update.message.reply_text(res)
+        await update.message.reply(res)
         if "✅" in res: clear_user_cargos(user_id)
     elif text == "🔍 سرچ راننده":
-        await update.message.reply_text("آیدی راننده را بفرستید:")
+        await update.message.reply("آیدی راننده را بفرستید:")
         return WAITING_FOR_ID_SEARCH
 
-async def manage_id_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def manage_id_action(update: Update, context):
     try:
         target_id = int(update.message.text)
         set_approval(target_id, 1)
-        await update.message.reply_text(f"✅ مجوز برای کاربر {target_id} فعال شد.")
+        await update.message.reply(f"✅ مجوز برای کاربر {target_id} فعال شد.")
     except:
-        await update.message.reply_text("⚠️ لطفاً فقط آیدی عددی را بفرستید.")
+        await update.message.reply("⚠️ لطفاً فقط آیدی عددی را بفرستید.")
     return ConversationHandler.END
 
-# (توابع set_user, set_pass, handle_add_data مشابه کد قبلی هستند)
-async def set_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def set_user(update: Update, context):
     context.user_data['temp_user'] = update.message.text
-    await update.message.reply_text("رمز عبور سایت را وارد کنید:")
+    await update.message.reply("رمز عبور سایت را وارد کنید:")
     return SETTING_PASS
 
-async def set_pass(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def set_pass(update: Update, context):
     user_id = update.message.from_user.id
     save_user_credentials(user_id, context.user_data['temp_user'], update.message.text)
-    await update.message.reply_text("✅ حساب ذخیره شد!", reply_markup=main_menu_keyboard())
+    await update.message.reply("✅ حساب ذخیره شد!", reply_markup=main_menu_keyboard())
     return ConversationHandler.END
 
-async def handle_add_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_add_data(update: Update, context):
     user_id = update.message.from_user.id
     try:
         p = [x.strip() for x in update.message.text.split(',')]
         if len(p) < 5: raise ValueError
         save_cargo(user_id, p[0], p[1], p[2], p[3], p[4])
-        await update.message.reply_text(f"📦 ذخیره شد.", reply_markup=main_menu_keyboard())
-    except: await update.message.reply_text("⚠️ فرمت اشتباه!")
+        await update.message.reply(f"📦 ذخیره شد.", reply_markup=main_menu_keyboard())
+    except: await update.message.reply("⚠️ فرمت اشتباه!")
     return ConversationHandler.END
 
 def main():
     init_db()
-    app = Application.builder().token(TOKEN).build()
+
+    bot.set_commands([
+        (CommandHandler('start', start)),
+    ])
 
     conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu)],
+        entry_points=[MessageHandler(TextFilter(), handle_menu)],
         states={
-            SETTING_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_user)],
-            SETTING_PASS: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_pass)],
-            WAITING_FOR_DATA: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_data)],
-            ADMIN_MANAGE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, manage_id_action)],
+            SETTING_USER: [MessageHandler(TextFilter(), set_user)],
+            SETTING_PASS: [MessageHandler(TextFilter(), set_pass)],
+            WAITING_FOR_DATA: [MessageHandler(TextFilter(), handle_add_data)],
+            ADMIN_MANAGE_ID: [MessageHandler(TextFilter(), manage_id_action)],
         },
         fallbacks=[CommandHandler('start', start)],
     )
 
-    app.add_handler(CommandHandler('start', start))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(conv_handler)
-    app.run_polling()
+    bot.add_handler(CommandHandler('start', start))
+    bot.add_handler(CallbackQueryHandler(handle_callback))
+    bot.add_handler(conv_handler)
+    bot.run()
 
 if __name__ == "__main__":
     main()
-  
+    
