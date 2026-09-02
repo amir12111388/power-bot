@@ -6,7 +6,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 
 # ===== CONFIG =====
 BOT_TOKEN = "8950977940:AAEtNtUrPI322WdCKOJFwRikO3myRA9hNXo"
-OWNER_ID = 7860500580  # آیدی عددی خودتو بذار اینجا
+OWNER_ID = 7860500580 # آیدی عددی خودتو بذار اینجا
 
 # ===== DATABASE =====
 conn = sqlite3.connect("prime_stars.db", check_same_thread=False)
